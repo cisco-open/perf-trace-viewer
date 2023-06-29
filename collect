@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+#
+# Copyright 2024 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# This script collects all the data needed for visualization.
+#
+# This is a standalone bash script for portability, suitable for pasting into a
+# remote system. It should work even with just a plain POSIX /bin/sh.
+
+usage()
+{
+    exec >&2
+    if [ -n "$1" ]; then
+        echo "Error: $1"
+        echo
+    fi
+    echo "Usage: $0 [-h] [-p] [-c gzip|bzip2|xz] [-o <other options>] <time in seconds>"
+    echo ""
+    echo "options:"
+    echo "  -h, --help           show this message and exit"
+    echo "  -p, --preserve       preserve raw perf.data file"
+    echo "  -c, --compressor     specify compression algorithm"
+    echo "  -o, --other-opts     pass the additional opts to perf sched record"
+    echo ""
+    echo "For an example of -o, running:"
+    echo "  $0 -o \"-C 0,2-3\" 5"
+    echo "will record 5 seconds of data for only CPU cores 0, 2 and 3."
+    echo ""
+    echo "Save system data for later visualization using"
+    echo "https://github.com/cisco-open/perf-trace-viewer"
+    echo ""
+    exit 1
+}
+
+# Options
+preserve=0
+duration=0
+preferred_compressor=""
+other_opts=""
+
+process_opts()
+{
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage;;
+            -p|--preserve) preserve=1; shift;;
+            -c|--compressor) preferred_compressor="$2"; shift; shift;;
+            -o|--other-opts) shift; other_opts="$1"; shift;;
+            [0-9]*) duration="$1"; shift;;
+            *) usage "Invalid argument: $1";;
+        esac
+    done
+    if [ "$duration" -eq 0 ]; then
+        usage 'Must provide number of seconds to record (eg 10)'
+    fi
+}
+
+# Get process info from /proc
+get_proc_info()
+{
+    cat /proc/[1-9]*/stat
+}
+
+# Print an error message and exit
+die()
+{
+    exec >&2
+    echo ""
+    echo "ERROR: $*"
+    echo ""
+    exit 1
+}
+
+perf_sched_record_cmd="?"
+
+# Run perf sched record
+run_perf_sched_record()
+{
+    # perf sched record command:
+    #  --mmap-pages: use bigger buffer for less disk I/O
+    #  --aio: use aync I/O if possible (not supported on old versions)
+    #  sleep <n>: record system while sleep for n seconds
+    cmd="perf sched record --mmap-pages 8M"
+    if [ -z "$1" ]; then
+        cmd="$cmd --aio"
+    fi
+    cmd="$cmd $other_opts -- sleep $duration"
+
+    # Run perf sched record
+    $cmd 2>/dev/null
+    rc=$?
+
+    # Handle exit codes
+    if [ $rc -eq 139 ]; then
+        echo "ERROR: 'perf sched record' hit a segmentation fault."
+        echo "If you are running in a container, restart it with --privileged."
+        exit 1
+    fi
+
+    if [ $rc -eq 129 ] && [ -z "$1" ]; then
+        # Older versions don't support --aio (for more efficient disk usage) -
+        # no need to bleat about it, just drop that option.
+        run_perf_sched_record no-aio
+        return
+    fi
+    if [ $rc -ne 0 ]; then
+        die "'$cmd' failed with exit code $rc"
+    fi
+    perf_sched_record_cmd="$cmd"
+}
+
+perf_script_cmd=""
+
+# Run perf script
+run_perf_script()
+{
+    # perf script command:
+    #   --show-task-events: list all processes/threads at start
+    #   --fields: include pid, tid, cpu (core) number, timestamp, type of event,
+    #             and event details
+    #   --ns: use nanosecond resolution (not supported on old versions)
+    cmd="perf script --show-task-events --fields pid,tid,cpu,time,event,trace"
+    if [ -z "$1" ]; then
+        cmd="$cmd --ns"
+    fi
+
+    # Run perf script
+    $cmd 2>/dev/null
+    rc=$?
+    if [ $rc -eq 129 ] && [ -z "$1" ]; then
+        # Older versions of perf don't support --ns
+        run_perf_script no-ns
+        return
+    fi
+    if [ $rc -ne 0 ]; then
+        die "'$cmd' failed with exit code $rc"
+    fi
+    perf_script_cmd="$cmd"
+}
+
+# Create the metadata. See `parse_mdata.py` for more format details.
+create_mdata()
+{
+    cat <<EOF
+## System performance data for https://github.com/cisco-open/perf-trace-viewer
+# date: $date
+# system: $uname
+# duration: $duration seconds
+# perf-version: $perf_version
+# perf-sched-cmd: $perf_sched_record_cmd
+# perf-script-cmd: $perf_script_cmd
+## before
+$before
+## after
+$after
+EOF
+}
+
+# Find the best compression program available
+compress=""
+extension=""
+find_compressor()
+{
+
+    # These are in increasing order of preference (compression ratio) - all are
+    # transparently handled by the python tarfile module when processing.
+    for option in gzip/gz bzip2/bz2 xz/xz; do
+        prog=${option%/*}
+        ext=${option#*/}
+        if which "$prog" >/dev/null 2>&1; then
+            compress=$prog
+            extension=$ext
+            # If this is the user-specified preferred compressor, return
+            # immediately.  Otherwise, keep searching for better options.
+            if [ "$preferred_compressor" = "$prog" ]; then
+                return
+            fi
+        fi
+    done
+
+    if [ -z "$compress" ]; then
+        die "No compression program found."
+    fi
+}
+
+# Go!
+
+# Set up
+filename="perf-data-$(date +%Y-%m-%d_%H-%M-%S).tar"
+date=$(date)
+uname=$(uname -a)
+perf_version=$(perf --version)
+process_opts "$@"
+find_compressor
+
+# Specific to Cisco IOS-XR: disable memdbg if present, since otherwise it can
+# cause perf to coredump.
+if [ "$LD_PRELOAD" = "/pkg/lib/libmemdbg.so" ]; then
+    unset LD_PRELOAD
+fi
+
+# Get the "before" process info
+before=$(get_proc_info)
+
+# Record the system
+echo "Collecting $duration seconds of data..."
+run_perf_sched_record
+if [ $preserve -eq 0 ]; then
+    trap "rm -f perf.data" EXIT
+fi
+
+# Get the "after" process info
+after=$(get_proc_info)
+
+# Run perf script
+echo "Converting and compressing data..."
+run_perf_script > perf.data.txt
+
+# Create the metadata
+create_mdata "$before" "$after" > perf-mdata.txt
+
+# Tar it up, taking care that the mdata comes first
+tar cf "$filename" perf-mdata.txt perf.data.txt
+$compress "$filename"
+rm -f perf.data.txt perf-mdata.txt
+
+# Done!
+echo "Done!"
+du -sh "$PWD/$filename.$extension"
+if [ $preserve -eq 1 ]; then
+    du -sh "$PWD/perf.data"
+fi

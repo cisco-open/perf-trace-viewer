@@ -1,0 +1,69 @@
+name: Main branch CI
+
+on:
+  push
+
+jobs:
+  CI:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Unit tests for parse_perf_script.py
+        run: python3 perf_trace_viewer/parse_perf_script.py
+
+      - name: Unit tests for parse_mdata.py
+        run: python3 perf_trace_viewer/parse_mdata.py
+
+      - name: Install dependencies
+        run: pip install mypy black isort pylint
+
+      - name: Check types
+        run: mypy --strict perf_trace_viewer
+
+      - name: Check import order
+        run: isort --profile black perf_trace_viewer
+
+      - name: Check code formatting
+        run: black --check perf_trace_viewer
+
+      - name: Check code style
+        run: pylint perf_trace_viewer
+
+      - name: Check the collection script
+        run: |
+          # Run shellcheck twice, for both bash, and POSIX /bin/sh
+          # (using dash as an approximate stand-in for POSIX /bin/sh)
+          shellcheck collect &&
+          shellcheck --shell=dash collect
+
+      - name: Prepare standalone scripts
+        run: |
+          mkdir zipped
+          # We've done all the tests, so can delete any
+          # test-only modules before zipping up.
+          rm -f perf_trace_viewer/*test*.py
+          python3 -m zipapp perf_trace_viewer \
+            --output=zipped/perf_trace_viewer \
+            --python="/usr/bin/env python3"
+
+      - name: Test standalone script
+        run: zipped/perf_trace_viewer --help
+
+      - name: Add artefacts to release if tagged
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            collect
+            zipped/perf_trace_viewer
+
+permissions:
+  contents: write
