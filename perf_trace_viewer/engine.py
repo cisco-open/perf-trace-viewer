@@ -57,7 +57,7 @@ from trace_event import (
     ThreadNameEvent,
     ThreadSortIndexEvent,
 )
-from utils import EventList, PidMapper, IncludeThisTimestamp, Spans, Stats
+from utils import EventList, IncludeThisTimestamp, PidMapper, Spans, Stats
 
 # A number that when negated, bigger than highest possible cpu index. Used as a
 # virtual CPU index for threads waiting longer than wait_threshold (by default 3ms).
@@ -71,12 +71,15 @@ WAITING_TASK = "Waiting"
 # Process an iterable of lines, and return the data
 def process_perf_data(
     lines: Iterable[str],
-    _mdata: Dict[str, str],
+    mdata: Dict[str, str],
     proc_info: Dict[int, ProcStat],
     skip: float,
     duration: float,
     wait: float,
 ) -> List[Mapping[str, object]]:
+    # Import here to avoid circular imports
+    from parse_mdata import is_eevdf_scheduler
+
     # Determine whether a thread is a kernel thread, using supplied proc_info
     # (see eg https://stackoverflow.com/questions/12213445/identifying-kernel-threads)
     def is_kernel(pid: int) -> bool:
@@ -86,8 +89,11 @@ def process_perf_data(
         except KeyError:
             return False
 
+    # Detect scheduler type from kernel version
+    use_eevdf = is_eevdf_scheduler(mdata)
+
     # Fire up the engine!
-    engine = Engine(skip, duration, wait, is_kernel)
+    engine = Engine(skip, duration, wait, is_kernel, use_eevdf)
     return engine.process(lines)
 
 
@@ -98,9 +104,11 @@ class Engine:
         seconds_to_process: float,
         wait_threshold: float,
         is_kernel: Callable[[int], bool],
+        use_eevdf: bool = False,
     ) -> None:
         self.wait_threshold = wait_threshold
         self.is_kernel = is_kernel
+        self.use_eevdf = use_eevdf
         self.pid_mapper = PidMapper()
         self.events = EventList(self.pid_mapper)
         self.spans = Spans(self.events)
@@ -164,8 +172,12 @@ class Engine:
                         # "outside-pid-namespace user-visible pid/tid"
                         self.events.maybe_add_mapping(ipid, opid, otid)
                         # Second, save the runtime stats
+                        runtime = int(args["runtime"])
+                        # Handle vruntime gracefully - it may not be present in EEVDF
+                        vruntime = int(args.get("vruntime", 0))
+                        has_vruntime = "vruntime" in args
                         self.stats.save_stats(
-                            cpu, ts, ipid, int(args["runtime"]), int(args["vruntime"])
+                            cpu, ts, ipid, runtime, vruntime, has_vruntime
                         )
 
             case CommRecord(name, pid, tid):
