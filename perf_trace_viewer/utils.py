@@ -238,7 +238,7 @@ class Stats:
     """
 
     def __init__(self) -> None:
-        self.cpu_stats: Dict[int, Tuple[int, int, int, int]] = {}
+        self.cpu_stats: Dict[int, Tuple[int, int, int, int, bool]] = {}
         self.ipid_runtime: DefaultDict[int, int] = defaultdict(int)
         self.ipid_start_running_ts: Dict[int, int] = {}
 
@@ -250,24 +250,33 @@ class Stats:
         args = {}
         if ipid_just_stopped in self.ipid_start_running_ts:
             started_running = self.ipid_start_running_ts[ipid_just_stopped]
-            stat_ts, stat_pid, runtime, vruntime = self.cpu_stats.get(cpu, (0, 0, 0, 0))
+            stat_ts, stat_pid, runtime, vruntime, has_vruntime = self.cpu_stats.get(
+                cpu, (0, 0, 0, 0, False)
+            )
             if stat_pid == ipid_just_stopped and stat_ts >= started_running:
-                args["CFS runtime (ns)"] = runtime
-                args["CFS vruntime (ns)"] = vruntime
+                args["Runtime (ns)"] = runtime
+                if has_vruntime:
+                    args["CFS vruntime (ns)"] = vruntime
                 self.ipid_runtime[ipid_just_stopped] += runtime
             else:
                 # We didn't get a stat for this run interval, so proxy a best guess
                 approx_runtime = ts - started_running
                 self.ipid_runtime[ipid_just_stopped] += approx_runtime
-                args["Non-CFS runtime (ns)"] = approx_runtime
+                args["Estimated runtime (ns)"] = approx_runtime
         self.ipid_start_running_ts[ipid_starting_next] = ts
         return args
 
     # Save stats when we get it from a scheduling stats entry.
     def save_stats(
-        self, cpu: int, ts: int, ipid: int, runtime: int, vruntime: int
+        self,
+        cpu: int,
+        ts: int,
+        ipid: int,
+        runtime: int,
+        vruntime: int,
+        has_vruntime: bool = True,
     ) -> None:
-        self.cpu_stats[cpu] = (ts, ipid, runtime, vruntime)
+        self.cpu_stats[cpu] = (ts, ipid, runtime, vruntime, has_vruntime)
 
     # Walk the record of all ipids and their total runtime.
     def runtime_items(self) -> Iterable[Tuple[int, int]]:
