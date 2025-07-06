@@ -1,5 +1,5 @@
 [pylint]
-disable=line-too-long,missing-class-docstring,invalid-name,missing-function-docstring,too-many-arguments,missing-module-docstring
+disable=line-too-long,missing-class-docstring,invalid-name,missing-function-docstring,too-many-arguments,too-many-positional-arguments,missing-module-docstring
 
 [pylint.perf_traceviewer.__main__.py]
 disable=wrong-import-position,consider-using-with
