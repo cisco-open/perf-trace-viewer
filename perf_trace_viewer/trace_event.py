@@ -56,18 +56,21 @@ class DurationEvent(Event):
 @dataclass
 class BeginEvent(DurationEvent):
     "An event that starts a span"
+
     ph: str = "B"
 
 
 @dataclass
 class EndEvent(DurationEvent):
     "An event that ends a span"
+
     ph: str = "E"
 
 
 @dataclass
 class InstantEvent(Event):
     "A standalone event"
+
     ph: str = "i"
     s: str = "p"  # scope ('g' for global, 'p' for process, 't' for thread)
 
@@ -75,12 +78,14 @@ class InstantEvent(Event):
 @dataclass
 class MetadataEvent(Event):
     "A metadata record"
+
     ph: str = "M"
 
 
 @dataclass
 class ProcessNameEvent(MetadataEvent):
     "Metadata that associates a user-visible pid with a process name"
+
     name = "process_name"
 
     def __init__(self, pid: int, process_name: str) -> None:
@@ -91,6 +96,7 @@ class ProcessNameEvent(MetadataEvent):
 @dataclass
 class ThreadNameEvent(MetadataEvent):
     "Metadata that associates a user-visible (pid, tid) pair with a thread name"
+
     name = "thread_name"
 
     def __init__(self, pid: int, tid: int, thread_name: str) -> None:
@@ -102,6 +108,7 @@ class ThreadNameEvent(MetadataEvent):
 @dataclass
 class ProcessLabelEvent(MetadataEvent):
     "Metadata that associates a label with a process"
+
     name = "process_labels"
 
     def __init__(self, pid: int, label: str) -> None:
