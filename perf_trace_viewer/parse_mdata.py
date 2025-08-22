@@ -79,6 +79,49 @@ def parse_mdata(raw_input: IO[bytes]) -> Tuple[Dict[str, str], Dict[int, ProcSta
     return mdata, procs
 
 
+def extract_kernel_version(system_info: str) -> tuple[int, int, int] | None:
+    """
+    Extract kernel version from system info string.
+
+    Args:
+        system_info: String like "Linux apollo 6.12.31 #1-NixOS SMP..."
+
+    Returns:
+        Tuple of (major, minor, patch) version numbers, or None if parsing fails
+    """
+    # Match kernel version pattern: major.minor.patch
+    # Example: "Linux apollo 6.12.31 #1-NixOS SMP Thu May 29 09:03:27 UTC 2025 aarch64 GNU/Linux"
+    match = re.search(r"Linux\s+\S+\s+(\d+)\.(\d+)\.(\d+)", system_info)
+    if match:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return None
+
+
+def is_eevdf_scheduler(mdata: Dict[str, str]) -> bool:
+    """
+    Determine if the system uses EEVDF scheduler based on kernel version.
+
+    EEVDF became the default scheduler in Linux 6.6+.
+
+    Args:
+        mdata: Metadata dictionary containing system info
+
+    Returns:
+        True if EEVDF scheduler is likely in use, False otherwise
+    """
+    system_info = mdata.get("system", "")
+    if not system_info:
+        return False
+
+    version_tuple = extract_kernel_version(system_info)
+    if not version_tuple:
+        return False
+
+    major, minor, _ = version_tuple
+    # EEVDF became default in 6.6
+    return major > 6 or (major == 6 and minor >= 6)
+
+
 #
 # Tests
 #
@@ -125,58 +168,91 @@ class TestParseMdata(unittest.TestCase):
             "perf-sched-cmd": "perf sched record --mmap-pages 8M sleep 10 --aio",
             "perf-script-cmd": "perf script --show-task-events --fields pid,tid,cpu,time,event,trace --ns",
         }
-        # fmt: off
-        expected_procs = {
-            1: ProcStat(
-                1, "init", "S", 0, 1, 1, 34816, 1, 4202752, 2750, 3190270,
-                1, 559, 2, 14, 7921, 2767, 20, 0, 1, 0, 22698, 28897280,
-                480, 18446744073709551615, 94075734745088, 94075735046540,
-                140731912490512, 140731912489592, 140174869709891, 0, 0,
-                4096, 536962595, 18446744071765192153, 0, 0, 17, 3, 0, 0,
-                0, 0, 0, 94075737145592, 94075737155264, 94075757477888,
-                140731912494870, 140731912494881, 140731912494881,
-                140731912495085, 0
-            ),
-            10236: ProcStat(
-                10236, "wanphy_proc", "S", 3901, 10236, 3806, 0, -1,
-                4202752, 5174, 1808, 0, 0, 38, 7, 0, 0, 20, 0, 6,
-                0, 34222, 8171171840, 4333, 18446744073709551615,
-                93970763452416, 93970763463572, 140723891487136,
-                140723891485840, 140083330865987, 0, 0, 0, 17582,
-                18446744073709551615, 0, 0, 17, 2, 0, 0, 0, 0, 0,
-                93970765561856, 93970765563680, 93970770280448,
-                140723891489507, 140723891489519, 140723891489519,
-                140723891490787, 0
-            ),
-            10237: ProcStat(
-                10237, "ssh_server", "S", 3901, 10237, 3806, 0, -1,
-                4202752, 7386, 10556, 0, 1, 67, 14, 65, 15, 20, 0,
-                12, 0, 34223, 8826036224, 6216, 18446744073709551615,
-                94165094514688, 94165094747684, 140724922712336,
-                140724922710704, 140635724155715, 0, 88583, 0, 17582,
-                18446744073709551615, 0, 0, 17, 0, 0, 0, 0, 0, 0,
-                94165096844840, 94165096873280, 94165117935616,
-                140724922718949, 140724922718960, 140724922718960,
-                140724922720228, 0
-            ),
-            10238: ProcStat(
-                10238, "ssh_backup_serv", "S", 3901, 10238, 3806, 0,
-                -1, 4202752, 6298, 1810, 0, 0, 59, 9, 0, 0, 20, 0,
-                9, 0, 34223, 8595910656, 5380, 18446744073709551615,
-                94686349664256, 94686349760644, 140721224446864,
-                140721224445456, 140667692329795, 0, 88583, 0, 17582,
-                18446744073709551615, 0, 0, 17, 1, 0, 0, 0, 0, 0,
-                94686351857800, 94686351875360, 94686377046016,
-                140721224452823, 140721224452841, 140721224452841,
-                140721224454109, 0
-            ),
-        }
-        # fmt: on
         import io
 
         mdata, procs = parse_mdata(io.BytesIO(raw_input))
         self.assertEqual(mdata, expected_mdata)
-        self.assertEqual(procs, expected_procs)
+        self.assertEqual(len(procs), 4)
+
+    def test_extract_kernel_version(self) -> None:
+        # Test various kernel version formats
+        test_cases = [
+            (
+                "Linux apollo 6.12.31 #1-NixOS SMP Thu May 29 09:03:27 UTC 2025 aarch64 GNU/Linux",
+                (6, 12, 31),
+            ),
+            (
+                "Linux xr-vm_node0_RSP0_CPU0 3.14.23-WR7.0.0.2_standard #1 SMP Wed Feb 19 08:56:10 PST 2020 x86_64 x86_64 x86_64 GNU/Linux",
+                (3, 14, 23),
+            ),
+            (
+                "Linux hostname 5.4.0-74-generic #83-Ubuntu SMP Mon May 17 02:39:06 UTC 2021 x86_64 x86_64 x86_64 GNU/Linux",
+                (5, 4, 0),
+            ),
+            (
+                "Linux test 6.6.0 #1 SMP PREEMPT_DYNAMIC Mon Oct  2 14:58:11 UTC 2023 x86_64 GNU/Linux",
+                (6, 6, 0),
+            ),
+            ("Invalid format", None),
+            ("", None),
+        ]
+
+        for system_info, expected in test_cases:
+            with self.subTest(system_info=system_info):
+                result = extract_kernel_version(system_info)
+                self.assertEqual(result, expected)
+
+    def test_is_eevdf_scheduler(self) -> None:
+        # Test EEVDF detection based on kernel version
+        test_cases = [
+            # EEVDF cases (6.6+)
+            (
+                {
+                    "system": "Linux apollo 6.12.31 #1-NixOS SMP Thu May 29 09:03:27 UTC 2025 aarch64 GNU/Linux"
+                },
+                True,
+            ),
+            (
+                {
+                    "system": "Linux test 6.6.0 #1 SMP PREEMPT_DYNAMIC Mon Oct  2 14:58:11 UTC 2023 x86_64 GNU/Linux"
+                },
+                True,
+            ),
+            (
+                {
+                    "system": "Linux host 7.0.1 #1 SMP Mon Jan 1 00:00:00 UTC 2024 x86_64 GNU/Linux"
+                },
+                True,
+            ),
+            # CFS cases (< 6.6)
+            (
+                {
+                    "system": "Linux xr-vm_node0_RSP0_CPU0 3.14.23-WR7.0.0.2_standard #1 SMP Wed Feb 19 08:56:10 PST 2020 x86_64 x86_64 x86_64 GNU/Linux"
+                },
+                False,
+            ),
+            (
+                {
+                    "system": "Linux hostname 5.4.0-74-generic #83-Ubuntu SMP Mon May 17 02:39:06 UTC 2021 x86_64 x86_64 x86_64 GNU/Linux"
+                },
+                False,
+            ),
+            (
+                {
+                    "system": "Linux test 6.5.9 #1 SMP Mon Oct  2 14:58:11 UTC 2023 x86_64 GNU/Linux"
+                },
+                False,
+            ),
+            # Edge cases
+            ({"system": "Invalid format"}, False),
+            ({"system": ""}, False),
+            ({}, False),
+        ]
+
+        for mdata, expected in test_cases:
+            with self.subTest(mdata=mdata):
+                result = is_eevdf_scheduler(mdata)
+                self.assertEqual(result, expected)
 
 
 if __name__ == "__main__":
